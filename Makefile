@@ -16,7 +16,7 @@ $(CMD): $(OBJS)
 	$(CC)  -o $@ $^ $(LFLAGS) $(LIBS)
 
 # 
-phony: clean new
+.PHONY: clean new
 
 clean:
 	-/bin/rm -f *.o *~ $(CMD)
