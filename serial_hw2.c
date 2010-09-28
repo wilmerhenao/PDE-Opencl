@@ -2,8 +2,14 @@
 
    solve 3d poisson equation   lapl u = f  u = g on bndry
    in square domain  [xlo, xhi] by [ylo, yhi] by [zlo, zhi] (set to [-1, 1])
-   with dirichlet boundary conditions using simple jacobi iteration (GS or SOR
-   are optional - see comments in code for how to turn on).
+   with dirichlet boundary conditions using simple jacobi iteration
+
+   To run: type
+     xserial   nx ny nz
+   where nx,ny,nz are the number of unknown cells in each dimension
+   
+   For example, if nx = 4 on [-1,1] then dx = .5.
+   There are 5 gridpoints in the interval, but 2 of them are known boundary conditions
 
 -------------------------------------------------------------------- */
 
@@ -133,7 +139,7 @@ void jacobi ( int nx, int ny, int nz, double u[], double f[], double tol, int it
     double ax, ay, az, d;
     double dx, dy, dz;
     double update_norm, unew;
-    int i, it, j, k;
+    int i, it, j, k, it_used = it_max;
     double *u_old, diff;
 
     /* Initialize the coefficients.  */
@@ -185,16 +191,17 @@ void jacobi ( int nx, int ny, int nz, double u[], double f[], double tol, int it
       } /* end for k */
 
         if (0 == it% io_interval) 
-            printf ( " iteration  %5d   norm update %12.3e\n", it, update_norm );
+            printf ( " iteration  %5d   norm update %14.4e\n", it, update_norm );
 
         if ( update_norm <= tol ) {
+          it_used = it;
           break;
         }
 
     } /* end for it iterations */
 
-    printf ( " iteration  %5d   norm update %12.3e\n", it, update_norm );
-    printf ( "  Total number of iterations %d\n", it );
+
+    printf ( " Final iteration  %5d   norm update %14.6e\n", it_used, update_norm );
 
     free ( u_old );
 
@@ -214,7 +221,8 @@ void init_prob ( int nx, int ny, int nz, double  f[], double u[],
     dy = (yhi - ylo) / ( double ) ( ny - 1 );
     dz = (zhi - zlo) / ( double ) ( nz - 1 );
 
-    /* Set the boundary conditions.  */
+    /* Set the boundary conditions. For this simple test use exact solution in bcs */
+    
     j = 0;   // low y bc
     y = ylo + j * dy;
 
