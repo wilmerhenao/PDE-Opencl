@@ -6,10 +6,11 @@
 
    To run: type
      xserial   nx ny nz
-   where nx,ny,nz are the number of unknown cells in each dimension
+   where nx,ny,nz are the number of grid points in each dimension
    
-   For example, if nx = 4 on [-1,1] then dx = .5.
-   There are 5 gridpoints in the interval, but 2 of them are known boundary conditions
+   For example, if nx = 5 on [-1,1] including the boundary conditions
+   then there are 4 cells, so  dx = .5, and there are 3 unknowns
+   since there are 2 boundary conditions that are known.
 
 -------------------------------------------------------------------- */
 
@@ -177,8 +178,8 @@ void jacobi ( int nx, int ny, int nz, double u[], double f[], double tol, int it
                           ay * ( U_OLD(i,j-1,k) + U_OLD(i,j+1,k) ) +
                           az * ( U_OLD(i,j,k-1) + U_OLD(i,j,k+1) ) ) ) / d;
 
-                diff = ABS(unew-U_OLD(i,j,k));
-                update_norm = update_norm + diff*diff;  /* using 2 norm */
+                diff = ABS(unew-U_OLD(i,j,k));  
+                //update_norm = update_norm + diff*diff;  /* using 2 norm */
 
                 if (diff > update_norm){ /* using max norm */
                     update_norm = diff;
