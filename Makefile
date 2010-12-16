@@ -1,28 +1,46 @@
+# /----------------------------------------------------------
+# | General setup
+# +----------------------------------------------------------
+# |
+CC = cc
+CFLAGS = -std=c99 -Wall -Werror -D_XOPEN_SOURCE=500
+OPTFLAGS = -g
+LDFLAGS = -lOpenCL -lm
+DEFINES = -DVERSION=0 -DPOINTS=64
+# |
+# \----------------------------------------------------------
+
+# /----------------------------------------------------------
+# | Compilation rules
+# +----------------------------------------------------------
+# |
 #
-#  Makefile for openMP assignment
-#
-CMD    = xserial
-CC     = icc
-CFLAGS = -O2 
-#CFLAGS = -O2 -openmp 
-LFLAGS = -openmp 
-LIBS   = -lm -lrt
-INCLUDE = 
-OBJS   = serial_hw2.o timing.o 
+EXECUTABLES = hello-gpu-small hello-gpu mg
 
-.c.o:
-	$(CC)  $(CFLAGS) $(INCLUDE) -c $<
+.PHONY:	all
+all:	$(EXECUTABLES)
 
+# Compile a C version (using basic_dgemm.c, in this case):
 
-$(CMD): $(OBJS)
-	$(CC)  -o $@ $^ $(LFLAGS) $(LIBS)
+hello-gpu: hello-gpu.o cl-helper.o
+	$(CC) -o $@ $^ 
 
-# 
-.PHONY: clean new
+mg: mg.o cl-helper.o
+	$(CC) -o $@ $^ $(LDFLAGS)
 
+# Generic Rules
+%.o:%.c
+	$(CC) -c $(CFLAGS) $(OPTFLAGS) $(DEFINES) $<
+# |
+# \----------------------------------------------------------
+
+# /----------------------------------------------------------
+# | Clean-up rules
+# +----------------------------------------------------------
+
+.PHONY:	clean
 clean:
-	-/bin/rm -f *.o *~ $(CMD)
+	rm -f $(EXECUTABLES) *.o
+# |
+# \----------------------------------------------------------
 
-new:
-	make clean
-	make $(CMD)

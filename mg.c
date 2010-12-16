@@ -10,11 +10,7 @@
 #error Need to specify VERSION.
 #endif
 
-#ifdef FOURTH_ORDER
-#define ORDER 4
-#else
 #define ORDER 2
-#endif
 
 #define GHOST_COUNT (ORDER/2)
 
@@ -64,10 +60,11 @@ int main()
   // --------------------------------------------------------------------------
   // load kernels
   // --------------------------------------------------------------------------
+  // read the cl file
   char buf[100];
   sprintf(buf, "wave-kernel-o%d-ver%d.cl", ORDER, VERSION);
   char *knl_text = read_file(buf);
-
+  //get work group dimensions and gflop info.
   int wg_dims , wg_x, wg_y, wg_z, z_div, fetch_per_pt, flops_per_pt;
   if (sscanf(knl_text, "// workgroup: (%d,%d,%d) z_div:%d fetch_per_pt:%d flops_per_pt:%d", 
         &wg_x, &wg_y, &wg_z, &z_div, &fetch_per_pt, &flops_per_pt) == 6)
@@ -92,10 +89,11 @@ int main()
   char *compile_opt = "-DFTYPE=float";
 #endif
 
+  // creation of gthe kernel
   cl_kernel wave_knl = kernel_from_string(ctx, knl_text, "fd_update", 
       compile_opt);
   free(knl_text);
-
+  // creation of the other kernel (the one that adds a number to a vector)
   knl_text = read_file("source-term.cl");
   cl_kernel source_knl = kernel_from_string(ctx, knl_text, "add_source_term", 
       compile_opt);
@@ -112,10 +110,8 @@ int main()
   ftype dx = (plus_bdry-minus_bdry)/(points-1);
   ftype dt = 0.5*dx;
   ftype dt2_over_dx2 = dt*dt / (dx*dx);
-#ifdef FOURTH_ORDER
-  dt2_over_dx2 /= 12;
-#endif
 
+  // I can erase this part in my own project
   ftype final_time;
 #ifdef DO_TIMING
   if (points > 256)
@@ -138,13 +134,13 @@ int main()
   // allocate and initialize CPU memory
   // --------------------------------------------------------------------------
 
-  unsigned dim_other = points+2*GHOST_COUNT;
+  unsigned dim_other = points+2*GHOST_COUNT; //if order 2 then 1 point extra on each side
 #ifdef USE_ALIGNMENT
-  unsigned dim_x = ((dim_other + 15) / 16) * 16;
+  unsigned dim_x = ((dim_other + 15) / 16) * 16; // adjusts dimension to the next number divisible by 16
   unsigned field_start = 16 + GHOST_COUNT*(dim_x+dim_other*dim_x);
 #else
   unsigned dim_x = dim_other;
-  unsigned field_start = GHOST_COUNT*(1+dim_x+dim_other*dim_x);
+  unsigned field_start = GHOST_COUNT*(1+dim_x+dim_other*dim_x);// this one puts me right at the beginning (the first positions get ignored cuz they are ghost points
 #endif
 
   const size_t field_size = 16+dim_x*dim_other*dim_other;
@@ -182,6 +178,8 @@ int main()
       for (size_t j = 0; j < points; ++j)
         for (size_t k = 0; k < points; ++k)
         {
+   	  // el cubo se llena primero de forma ascendiente y luego por el eje y.
+	  // notese que los campos de la cola se "invaden" el principio de la siguiente fila
           unsigned base = field_start + i + dim_x*(j + dim_other * k);
 
           ftype x = i * dx;
@@ -189,7 +187,7 @@ int main()
           ftype z = k * dx;
           host_buf[base] = exp(x)*sin(y)*cos(z);
         }
-
+    // variable f is assigned to buffer b
     CALL_CL_GUARDED(clEnqueueWriteBuffer, (
           queue, dev_buf_b, /*blocking*/ CL_TRUE, /*offset*/ 0,
           field_size * sizeof(ftype), host_buf,
@@ -230,21 +228,6 @@ int main()
           ftype ref_value =
             2 * u[base] - /*hist_u[base] */ 0
             + dt2_over_dx2 * (
-#ifdef FOURTH_ORDER
-                - 90*u[base]
-                + 16*u[base - 1]
-                + 16*u[base + 1]
-                + 16*u[base - dim_x]
-                + 16*u[base + dim_x]
-                + 16*u[base - dim_x*dim_other]
-                + 16*u[base + dim_x*dim_other]
-                - u[base - 2]
-                - u[base + 2]
-                - u[base - 2*dim_x]
-                - u[base + 2*dim_x]
-                - u[base - 2*dim_x*dim_other]
-                - u[base + 2*dim_x*dim_other]
-#else
                 - 6*u[base]
                 + u[base - 1]
                 + u[base + 1]
@@ -252,10 +235,9 @@ int main()
                 + u[base + dim_x]
                 + u[base - dim_x*dim_other]
                 + u[base + dim_x*dim_other]
-#endif
                 );
 
-          err_sum += square(ref_value-host_buf_2[base]);
+          err_sum += square(ref_value-host_buf_2[base]);// comparing the error with the cpu
         }
     free(host_buf_2);
 
@@ -265,7 +247,7 @@ int main()
       abort();
     }
   }
-
+  // NOW THE CASE WHEN POINTS > 128... and the other too.
   // --------------------------------------------------------------------------
   // zero out arrays
   // --------------------------------------------------------------------------
