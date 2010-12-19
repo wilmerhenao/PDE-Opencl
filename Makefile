@@ -3,9 +3,9 @@
 # +----------------------------------------------------------
 # |
 CC = cc
-CFLAGS = -std=c99 -Wall -Werror -D_XOPEN_SOURCE=500
+CFLAGS = -std=c99 -Wall -Werror -D_XOPEN_SOURCE=500 #-v -Q
 OPTFLAGS = -g
-LDFLAGS = -lOpenCL -lm
+LDFLAGS = -lOpenCL -lm #--enable-checking
 DEFINES = -DVERSION=0 -DPOINTS=64
 # |
 # \----------------------------------------------------------
