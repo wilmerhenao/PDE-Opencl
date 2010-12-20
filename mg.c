@@ -7,7 +7,11 @@
 #error Need to specify VERSION.
 #endif
 
-#define ORDER 2
+#define ORDER 1
+
+#ifndef CUTOFF
+#define CUTOFF 0
+#endif
 
 #ifdef USE_DOUBLE
 typedef double ftype;
@@ -64,22 +68,26 @@ void gsrelax(struct grids * , ftype );
 void U_error(ftype [], ftype [], ftype [], unsigned);
 ftype norm(ftype [], unsigned );
 void injf2c(struct grids * , struct grids *);
-void mgv(ftype [], ftype [], ftype, unsigned, unsigned, unsigned, size_t, unsigned, int, unsigned);
+void mgv(ftype [], ftype [], ftype, unsigned, unsigned, unsigned, size_t, unsigned, int, unsigned, cl_context, cl_command_queue, cl_kernel, int, int, int , int, int, int, int);
 /* ---- -------------------------------------------------------------------*/
+#ifdef DO_TIMING
+  double gbytes_accessed = 0;
+  double seconds_taken = 0;
+  double mcells_updated = 0;
+  double gflops_performed = 0;
+#endif
 
 int main()
 {
-  // print_platforms_devices();
-
-  //cl_context ctx;
-  //cl_command_queue queue;
-  //create_context_on("NVIDIA", NULL, 0, &ctx, &queue,
-  /*#ifdef DO_TIMING
-      1
-  #else
-      0
+  int enable_profiling = 0;
+  #ifdef DO_TIMING
+      enable_profiling = 1;
   #endif
-      );*/
+
+  print_platforms_devices();
+  cl_context ctx;
+  cl_command_queue queue;
+  create_context_on("NVIDIA", NULL, 0, &ctx, &queue, enable_profiling);
 
   // --------------------------------------------------------------------------
   // load kernels
@@ -108,10 +116,15 @@ int main()
     abort();
   }
 
-  // creation of the kernel
-  //cl_kernel wave_knl = kernel_from_string(ctx, knl_text, "fd_update", compile_opt);
-  //free(knl_text);
+  #ifdef USE_DOUBLE
+  char *compile_opt = "-DFTYPE=double";
+  #else
+  char *compile_opt = "-DFTYPE=float";
+  #endif
 
+  // creation of the kernel
+  cl_kernel poisson_knl = kernel_from_string(ctx, knl_text, "fd_update", compile_opt);
+  free(knl_text); // my compiler complains about this one.  OJO!!
   // --------------------------------------------------------------------------
   // set up grid
   // --------------------------------------------------------------------------
@@ -137,7 +150,7 @@ int main()
   use_alignment = 0;
   #endif
   // --------Allocate forcing uexact, r and u vectors -------------------------
-  const size_t field_size = 0+dim_x*dim_other*dim_other;
+  const size_t field_size = 0+dim_x*dim_x*dim_x;  // extra large to fit the 2^n constrain in GPU
   ftype *f = malloc(field_size*sizeof(ftype));
   CHECK_SYS_ERROR(!f, "allocating f");
   ftype *u = malloc (field_size*sizeof(ftype));
@@ -150,7 +163,7 @@ int main()
   // --------------------------------------------------------------------------
   // initialize
   // --------------------------------------------------------------------------
-    // zero out dev_buf_a (necessary to initialize everything bec. I measure norms)
+    // zero out (necessary to initialize everything bec. I measure norms)
     for (size_t i = 0; i < field_size; ++i){
       f[i] = 0;
       u[i] = 0;
@@ -169,9 +182,9 @@ int main()
     // --------------------------------------------------------------------------
   
     unsigned n1, n2, n3, ncycles;
-    n1 = 7;
-    n2 = 1;
-    n3 = 15;
+    n1 = 50;
+    n2 = 100;
+    n3 = 1;
     ncycles = 10;
     ftype *sweeps = malloc (ncycles*sizeof(ftype));
     ftype *rnorm = malloc (ncycles*sizeof(ftype));
@@ -186,7 +199,7 @@ int main()
     enorm[0] = norm( r, field_size ) * dx;
 
     for(unsigned icycle = 1; icycle <= ncycles; icycle++){
-       mgv(f, u, dx, n1, n2, n3, field_size, points, use_alignment, dim_x);  //update u 
+       mgv(f, u, dx, n1, n2, n3, field_size, points, use_alignment, dim_x, ctx, queue, poisson_knl, wg_dims , wg_x, wg_y, wg_z, z_div, fetch_per_pt, flops_per_pt);  //update u through a v-cycle 
        sweeps[icycle] = sweeps[icycle -1] + (4 * (n1 + n2)/3);
        resid (r, f, u, dx, field_size, field_start, dim_x, dim_other);
        rnorm[icycle] = norm( r, field_size ) * dx;
@@ -198,17 +211,15 @@ int main()
        if(rnorm[icycle] <= rtol * rnorm[0])
 	  break;
     }
-
+    #ifdef DO_TIMING
+  printf(" ftype:%d ver:%d align:%d pts:%d\tgflops:%.1f\tmcells:%.1f\tgbytes:%.1f [/sec]\n", (int) sizeof(ftype), VERSION, use_alignment, points, gflops_performed/seconds_taken, mcells_updated/seconds_taken, gbytes_accessed/seconds_taken);
+#endif
   // --------------------------------------------------------------------------
   // clean up
   // --------------------------------------------------------------------------
-  /*free(sweeps);
-  free(rnorm);
-  free(enorm);
-  free(f);
-  free(u);
-  free(uexact);
-  free(r);*/
+  CALL_CL_GUARDED(clReleaseKernel, (poisson_knl));
+  CALL_CL_GUARDED(clReleaseCommandQueue, (queue));
+  CALL_CL_GUARDED(clReleaseContext, (ctx));
 }
 
 ftype ufun ( ftype x, ftype y, ftype z ){
@@ -357,19 +368,27 @@ void init_uexact(unsigned points, ftype u[], ftype uexact[], ftype dx, size_t fi
 	}
 }
 
-void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, size_t field_size, unsigned points, int use_alignment, unsigned dim_x){
+void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, size_t field_size, unsigned points, int use_alignment, unsigned dim_x, cl_context ctx, cl_command_queue queue, cl_kernel poisson_knl, int wg_dims , int wg_x, int wg_y, int wg_z, int z_div, int fetch_per_pt, int flops_per_pt){
   // mgv does one v-cycle for the Poisson problem on a grid with mesh size dx
-
   // Inputs: f is right hand side, u is current approx dx is mesh size, n1 number of sweeps
-  // on downward branch, n2 number of sweeps on upwardranch, n3 number of sweeps on
+  // on downward branch, n2 number of sweeps on upwardbranch, n3 number of sweeps on
   // coarsest grid.
   // Output:  It just returns an updated version of u
-  size_t i, j, k, isweep;
+  size_t i, isweep;
   item * ugrid, * head, * curr;
   int l = 0;
-  ftype dxval[POINTS/2] = {0};  // this is huge and unnecessary.  Try to cut down!!
+  ftype dxval[POINTS/2] = {0};  // this is huge and unnecessary.  Try to cut downif time!!  
+  ftype h;
   unsigned nx[POINTS/2] = {0};
-  unsigned basec;
+  // --- Allocate common gpu memory----
+  cl_int status;
+  cl_mem dev_buf_u = clCreateBuffer(ctx, CL_MEM_READ_WRITE, field_size * sizeof(ftype), 0, &status);
+  CHECK_CL_ERROR(status, "clCreateBuffer");
+  cl_mem dev_buf_f = clCreateBuffer(ctx, CL_MEM_READ_ONLY, field_size * sizeof(ftype), 0, &status);
+  CHECK_CL_ERROR(status, "clCreateBuffer");
+  //cl_mem read_buf = clCreateBuffer(ctx, CL_MEM_READ_ONLY, field_size * sizeof(ftype), 0, &status);
+  CHECK_CL_ERROR(status, "clCreateBuffer");
+  // -----------------------------------
   dxval[0] = dx;
   nx[0] = points;
   //const size_t max_size  = POINTS * POINTS * ((POINTS + 15)/16) * 16;
@@ -383,6 +402,7 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
   for(i = 0; i < field_size; i++){
      ugrid->uvec[i] = u[i];
      ugrid->fvec[i] = f[i];
+     ugrid->rvec[i] = 0;
   }
   head = ugrid;  // head will always be the first one
 
@@ -395,23 +415,19 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
     curr->uvec = malloc(field_size * sizeof(ftype));
     curr->fvec = malloc(field_size * sizeof(ftype));
     curr->rvec = malloc(field_size * sizeof(ftype));
-    
+
     curr->dim_other = nx[l];
 
     curr->dim_x = curr->dim_other;
     if(use_alignment)
     	curr->dim_x = ((nx[l] + 15)/16) * 16;
 
-    // initialize vectors in the awkward positions where they belong
-    for(i = 0; i < nx[l]; i++)
-       for(j = 0; j< nx[l]; j++)
-          for(k = 0; k < nx[l]; k++){
-	    //basef = (ugrid->field_start+(2*i)+ugrid->dim_x * ((2*j) + ugrid->dim_other * (2 * k)));
-  	    basec = (curr->field_start + i + curr->dim_x * (j + curr->dim_other * k));
-            curr->uvec[basec] = 0;//ugrid->uvec[basef];
-	    curr->fvec[basec] = 0;//ugrid->fvec[basef];
- 	    curr->rvec[basec] = 0;//ugrid->rvec[basef];
-	  }
+    // initialize vectors
+    for(i = 0; i < field_size; i++){
+ 	curr->uvec[i] = 0;
+	curr->fvec[i] = 0;
+     	curr->rvec[i] = 0;
+    }
     ugrid->next = curr; // curr gets attached to ugrid
     curr->prev = ugrid;
     ugrid = curr;
@@ -424,19 +440,119 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
 
   // ---------------- Now relax each of the different grids descending--------
   for(l = 0; l < nl; l++){  // I stop right before nl (will be treated different)
+     // ----------------------------------------------------------------------
+     // -------------------- GPU DESCENDING V-CYCLE --------------------------
+     // ----------------------------------------------------------------------
+     {
+     if(curr->dim_other < CUTOFF){
+	for(isweep = 0; isweep < n1; isweep++){
+	     gsrelax(curr, dxval[l]);
+	}
+     }
 
-     for(isweep = 1; isweep <= n1; isweep++ ){
-        gsrelax(curr, dxval[l]);  // this one updates ul and fl a total of n1 times within curr
+     else{
+  	// ---GPU------GPU------GPU------GPU------GPU------GPU------GPU------GPU--- //
+  	// fill in the buffers inside the GPU with the current data
+  	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_u, CL_TRUE, 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
+  	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_f, CL_TRUE, 0, field_size * sizeof(ftype), curr->fvec, 0, NULL, NULL));
+  	h = dxval[l] * dxval[l];
+        size_t gdim[] = { curr->dim_x, curr->dim_x, curr->dim_x/z_div };
+        size_t ldim[] = { wg_x, wg_y, wg_z };
+
+  	for(i = 0; i < n1; i++){
+     	   // ----------------------------------------------------------------------
+     	   // invoke poisson kernel
+     	   // ----------------------------------------------------------------------
+     	   SET_6_KERNEL_ARGS(poisson_knl, dev_buf_u, dev_buf_f, curr->field_start, curr->dim_x, curr->dim_other, h);
+     	   #ifdef DO_TIMING
+     	   cl_event evt;
+     	   cl_event *evt_ptr = &evt;
+     	   #else
+     	   cl_event *evt_ptr = NULL;
+     	   #endif
+     	   // run the kernel
+     	   CALL_CL_GUARDED(clEnqueueNDRangeKernel, (queue, poisson_knl, /*dimensions*/ wg_dims, NULL, gdim, ldim, 0, NULL, evt_ptr));
+     	   #ifdef DO_TIMING
+      	   // If timing is enabled, this wait can mean a significant performance hit.
+      	   CALL_CL_GUARDED(clWaitForEvents, (1, &evt));
+ 
+      	   cl_ulong start, end;
+      	   CALL_CL_GUARDED(clGetEventProfilingInfo, (evt, CL_PROFILING_COMMAND_START, sizeof(start), &start, NULL));
+      	   CALL_CL_GUARDED(clGetEventProfilingInfo, (evt, CL_PROFILING_COMMAND_END, sizeof(start), &end, NULL));
+ 
+      	   gbytes_accessed += 1e-9*(sizeof(ftype) * field_size * fetch_per_pt);
+      	   seconds_taken += 1e-9*(end-start);
+      	   mcells_updated += curr->dim_other*curr->dim_other*curr->dim_other/1e6;
+      	   gflops_performed += 1e-9*curr->dim_x*curr->dim_x*curr->dim_x * flops_per_pt;
+
+      	   CALL_CL_GUARDED(clReleaseEvent, (evt));
+     	   #endif
+      	   CALL_CL_GUARDED(clFinish, (queue)); //ira adentro??
+     	}
+        //when I'm done, read from buffer
+        CALL_CL_GUARDED(clEnqueueReadBuffer, (queue, dev_buf_u, /*blocking*/ CL_TRUE, /*offset*/ 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
+      }
      }
      resid2(curr, dxval[l]);
      injf2c(curr, curr->next); //this function updates f_{i+1}
      curr = curr->next;
   }
-  // Update the coarsest grid n3 times
-  for(i = 0; i < n3; i++)
-     gsrelax(curr, dxval[nl]);
+  // ----------------------------------------------------------------------
+  // --------------- GPU ON THE COARSEST GRID -----------------------------
+  // ----------------------------------------------------------------------
+  {
+    if(curr->dim_other < CUTOFF){
+	for(i = 0; i < n3; i++){
+	     gsrelax(curr, dxval[nl]);
+	}
+    }
 
-  // -----------Upward branch of the V-cycle dont forget to free memory ------------------------------
+    else{
+  	// ---GPU------GPU------GPU------GPU------GPU------GPU------GPU------GPU--- //
+  	// fill in the buffers inside the GPU with the current data
+  	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_u, CL_TRUE, 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
+  	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_f, CL_TRUE, 0, field_size * sizeof(ftype), curr->fvec, 0, NULL, NULL));
+  	h = dxval[nl] * dxval[nl];
+        size_t gdim[] = { curr->dim_x, curr->dim_x, curr->dim_x/z_div };
+        size_t ldim[] = { wg_x, wg_y, wg_z };
+
+  	for(i = 0; i < n3; i++){
+     	   // ----------------------------------------------------------------------
+     	   // invoke poisson kernel
+     	   // ----------------------------------------------------------------------
+     	   SET_6_KERNEL_ARGS(poisson_knl, dev_buf_u, dev_buf_f, curr->field_start, curr->dim_x, curr->dim_other, h);
+     	   #ifdef DO_TIMING
+     	   cl_event evt;
+     	   cl_event *evt_ptr = &evt;
+     	   #else
+     	   cl_event *evt_ptr = NULL;
+     	   #endif
+     	   // run the kernel
+     	   CALL_CL_GUARDED(clEnqueueNDRangeKernel, (queue, poisson_knl, /*dimensions*/ wg_dims, NULL, gdim, ldim, 0, NULL, evt_ptr));
+     	   #ifdef DO_TIMING
+      	   // If timing is enabled, this wait can mean a significant performance hit.
+      	   CALL_CL_GUARDED(clWaitForEvents, (1, &evt));
+ 
+      	   cl_ulong start, end;
+      	   CALL_CL_GUARDED(clGetEventProfilingInfo, (evt, CL_PROFILING_COMMAND_START, sizeof(start), &start, NULL));
+      	   CALL_CL_GUARDED(clGetEventProfilingInfo, (evt, CL_PROFILING_COMMAND_END, sizeof(start), &end, NULL));
+ 
+      	   gbytes_accessed += 1e-9*(sizeof(ftype) * field_size * fetch_per_pt);
+      	   seconds_taken += 1e-9*(end-start);
+      	   mcells_updated += curr->dim_other*curr->dim_other*curr->dim_other/1e6;
+      	   gflops_performed += 1e-9*curr->dim_x*curr->dim_x*curr->dim_x * flops_per_pt;
+
+      	   CALL_CL_GUARDED(clReleaseEvent, (evt));
+     	   #endif
+      	   CALL_CL_GUARDED(clFinish, (queue)); //ira adentro??
+     	}
+        //when I'm done, read from buffer
+        CALL_CL_GUARDED(clEnqueueReadBuffer, (queue, dev_buf_u, /*blocking*/ CL_TRUE, /*offset*/ 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
+     }
+  }
+  // ----------------------------------------------------------------------
+  // -----------Upward branch of the V-cycle ------------------------------
+  // ----------------------------------------------------------------------
   for(l = nl-1; l >= 0; --l){
      ctof(curr->prev, curr, field_size); //curr->prev is the finer of the two
      free(curr->uvec);  //curr won't be needed anymore
@@ -447,9 +563,59 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
      for(isweep = 0; isweep < n2; isweep++){
 	   gsrelax(curr, dxval[l]);
      }
+     // Update the grids n1 times using the GPU when necessary
+     {
+     if(curr->dim_other < CUTOFF){
+	for(isweep = 0; isweep < n2; isweep++){
+	     gsrelax(curr, dxval[l]);
+	}
+     }
+
+     else{
+  	// ---GPU------GPU------GPU------GPU------GPU------GPU------GPU------GPU--- //
+  	// fill in the buffers inside the GPU with the current data
+  	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_u, CL_TRUE, 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
+  	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_f, CL_TRUE, 0, field_size * sizeof(ftype), curr->fvec, 0, NULL, NULL));
+  	h = dxval[l] * dxval[l];
+        size_t gdim[] = { curr->dim_x, curr->dim_x, curr->dim_x/z_div };
+        size_t ldim[] = { wg_x, wg_y, wg_z };
+
+  	for(i = 0; i < n1; i++){
+     	   // ----------------------------------------------------------------------
+     	   // invoke poisson kernel
+     	   // ----------------------------------------------------------------------
+     	   SET_6_KERNEL_ARGS(poisson_knl, dev_buf_u, dev_buf_f, curr->field_start, curr->dim_x, curr->dim_other, h);
+     	   #ifdef DO_TIMING
+     	   cl_event evt;
+     	   cl_event *evt_ptr = &evt;
+     	   #else
+     	   cl_event *evt_ptr = NULL;
+     	   #endif
+     	   // run the kernel
+     	   CALL_CL_GUARDED(clEnqueueNDRangeKernel, (queue, poisson_knl, /*dimensions*/ wg_dims, NULL, gdim, ldim, 0, NULL, evt_ptr));
+     	   #ifdef DO_TIMING
+      	   // If timing is enabled, this wait can mean a significant performance hit.
+      	   CALL_CL_GUARDED(clWaitForEvents, (1, &evt));
+ 
+      	   cl_ulong start, end;
+      	   CALL_CL_GUARDED(clGetEventProfilingInfo, (evt, CL_PROFILING_COMMAND_START, sizeof(start), &start, NULL));
+      	   CALL_CL_GUARDED(clGetEventProfilingInfo, (evt, CL_PROFILING_COMMAND_END, sizeof(start), &end, NULL));
+ 
+      	   gbytes_accessed += 1e-9*(sizeof(ftype) * field_size * fetch_per_pt);
+      	   seconds_taken += 1e-9*(end-start);
+      	   mcells_updated += curr->dim_other*curr->dim_other*curr->dim_other/1e6;
+      	   gflops_performed += 1e-9*curr->dim_x*curr->dim_x*curr->dim_x * flops_per_pt;
+
+      	   CALL_CL_GUARDED(clReleaseEvent, (evt));
+     	   #endif
+      	   CALL_CL_GUARDED(clFinish, (queue)); //ira adentro??
+     	}
+        //when I'm done, read from buffer
+        CALL_CL_GUARDED(clEnqueueReadBuffer, (queue, dev_buf_u, /*blocking*/ CL_TRUE, /*offset*/ 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
+      }
+     }
   }
   // ---------- and the solution is right there in the last curr curr->uvec
-  // I NEED TO DO SOMETHING TO RETURN THAT VALUE!!!
   for(i = 0; i < field_size; i++)
      u[i] = curr->uvec[i];
   free(curr->uvec);
@@ -459,8 +625,9 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
   //free(ugrid->fvec);
   //free(ugrid->rvec);
   free(curr);
+  CALL_CL_GUARDED(clReleaseMemObject, (dev_buf_u));
+  CALL_CL_GUARDED(clReleaseMemObject, (dev_buf_f));
 }
-  // update the coarsest grid
 
 void resid2(item * curr, ftype dx){
     
