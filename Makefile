@@ -15,7 +15,7 @@ DEFINES = -DVERSION=0 -DPOINTS=64
 # +----------------------------------------------------------
 # |
 #
-EXECUTABLES = hello-gpu-small hello-gpu mg
+EXECUTABLES = hello-gpu-small hello-gpu mg mg2
 
 .PHONY:	all
 all:	$(EXECUTABLES)
@@ -26,6 +26,9 @@ hello-gpu: hello-gpu.o cl-helper.o
 	$(CC) -o $@ $^ 
 
 mg: mg.o cl-helper.o
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+mg2: mg2.o cl-helper.o
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 # Generic Rules

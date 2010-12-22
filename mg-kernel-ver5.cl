@@ -1,10 +1,12 @@
-// workgroup: (16,16) fetch_per_pt:8 flops_per_pt:8
+// workgroup: (8,8) fetch_per_pt:8 flops_per_pt:8
 #pragma OPENCL EXTENSION cl_khr_fp64: enable
 __kernel void fd_update(__global FTYPE *u, __global const FTYPE *f, __global const FTYPE *hist_u, const unsigned field_start, const unsigned dim_x, const unsigned dim_other, const FTYPE h)
 {
   const int i = get_global_id(0);
   const int j = get_global_id(1);
   unsigned base;
+
+  if(i * j > 0){
 
   if(i < (dim_other - 1) && j < (dim_other-1) && i > 0 && j > 0){ //enter the for cycle only when necessary --- otherwise do nothing
 
@@ -17,5 +19,6 @@ __kernel void fd_update(__global FTYPE *u, __global const FTYPE *f, __global con
            /*+ h * f[base]*/
            ) / 6;
     }
+   }
   }
 }

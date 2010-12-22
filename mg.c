@@ -75,6 +75,7 @@ void mgv(ftype [], ftype [], ftype, unsigned, unsigned, unsigned, size_t, unsign
   double seconds_taken = 0;
   double mcells_updated = 0;
   double gflops_performed = 0;
+  double tot_secs = 0;
 #endif
 
 int main()
@@ -84,7 +85,7 @@ int main()
       enable_profiling = 1;
   #endif
 
-  print_platforms_devices();
+  //print_platforms_devices();
   cl_context ctx;
   cl_command_queue queue;
   create_context_on("NVIDIA", NULL, 0, &ctx, &queue, enable_profiling);
@@ -93,6 +94,7 @@ int main()
   // load kernels
   // --------------------------------------------------------------------------
   // read the cl file
+
   char buf[100];
   sprintf(buf, "mg-kernel-ver%d.cl", VERSION);
   char *knl_text = read_file(buf);
@@ -183,9 +185,9 @@ int main()
   
     unsigned n1, n2, n3, ncycles;
     n1 = 50;
-    n2 = 100;
+    n2 = 60;
     n3 = 1;
-    ncycles = 10;
+    ncycles = 2;
     ftype *sweeps = malloc (ncycles*sizeof(ftype));
     ftype *rnorm = malloc (ncycles*sizeof(ftype));
     ftype *enorm = malloc (ncycles*sizeof(ftype));
@@ -212,7 +214,7 @@ int main()
 	  break;
     }
     #ifdef DO_TIMING
-  printf(" ftype:%d ver:%d align:%d pts:%d\tgflops:%.1f\tmcells:%.1f\tgbytes:%.1f [/sec]\n", (int) sizeof(ftype), VERSION, use_alignment, points, gflops_performed/seconds_taken, mcells_updated/seconds_taken, gbytes_accessed/seconds_taken);
+  printf(" ftype:%d ver:%d align:%d pts:%d\tgflops:%.1f\tmcells:%.1f\tgbytes:%.1f [/sec]\tout_gflops:%.6f\n", (int) sizeof(ftype), VERSION, use_alignment, points, gflops_performed/seconds_taken, mcells_updated/seconds_taken, gbytes_accessed/seconds_taken, gflops_performed/tot_secs);
 #endif
   // --------------------------------------------------------------------------
   // clean up
@@ -374,6 +376,13 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
   // on downward branch, n2 number of sweeps on upwardbranch, n3 number of sweeps on
   // coarsest grid.
   // Output:  It just returns an updated version of u
+  cl_ulong start_big;
+  #ifdef DO_TIMING
+  cl_event evt;
+  cl_event *evt_ptr = &evt;
+  #else
+  cl_event *evt_ptr = NULL;
+  #endif
   size_t i, isweep;
   item * ugrid, * head, * curr;
   int l = 0;
@@ -385,6 +394,8 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
   cl_mem dev_buf_u = clCreateBuffer(ctx, CL_MEM_READ_WRITE, field_size * sizeof(ftype), 0, &status);
   CHECK_CL_ERROR(status, "clCreateBuffer");
   cl_mem dev_buf_f = clCreateBuffer(ctx, CL_MEM_READ_ONLY, field_size * sizeof(ftype), 0, &status);
+  CHECK_CL_ERROR(status, "clCreateBuffer");
+  cl_mem dev_buf_hist_u = clCreateBuffer(ctx, CL_MEM_READ_ONLY, field_size * sizeof(ftype), 0, &status);
   CHECK_CL_ERROR(status, "clCreateBuffer");
   //cl_mem read_buf = clCreateBuffer(ctx, CL_MEM_READ_ONLY, field_size * sizeof(ftype), 0, &status);
   CHECK_CL_ERROR(status, "clCreateBuffer");
@@ -417,7 +428,7 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
     curr->rvec = malloc(field_size * sizeof(ftype));
 
     curr->dim_other = nx[l];
-
+    curr->field_start = 0;
     curr->dim_x = curr->dim_other;
     if(use_alignment)
     	curr->dim_x = ((nx[l] + 15)/16) * 16;
@@ -455,6 +466,7 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
   	// fill in the buffers inside the GPU with the current data
   	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_u, CL_TRUE, 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
   	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_f, CL_TRUE, 0, field_size * sizeof(ftype), curr->fvec, 0, NULL, NULL));
+	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_hist_u, CL_TRUE, 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
   	h = dxval[l] * dxval[l];
         size_t gdim[] = { curr->dim_x, curr->dim_x, curr->dim_x/z_div };
         size_t ldim[] = { wg_x, wg_y, wg_z };
@@ -463,13 +475,12 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
      	   // ----------------------------------------------------------------------
      	   // invoke poisson kernel
      	   // ----------------------------------------------------------------------
-     	   SET_6_KERNEL_ARGS(poisson_knl, dev_buf_u, dev_buf_f, curr->field_start, curr->dim_x, curr->dim_other, h);
-     	   #ifdef DO_TIMING
-     	   cl_event evt;
-     	   cl_event *evt_ptr = &evt;
-     	   #else
-     	   cl_event *evt_ptr = NULL;
-     	   #endif
+	   //size_t u_size;
+	   //CALL_CL_GUARDED(clGetMemObjectInfo, (dev_buf_u, CL_MEM_SIZE, sizeof(u_size), &u_size, 0));
+	   //int u_size_i = u_size;
+	   //printf("u_size=%d fstart=%d dim_x=%d dim_other=%d\n" , u_size_i, curr->field_start, curr->dim_x, curr->dim_other);
+	   curr->field_start = 0;
+     	   SET_7_KERNEL_ARGS(poisson_knl, dev_buf_u, dev_buf_f, dev_buf_hist_u, curr->field_start, curr->dim_x, curr->dim_other, h);
      	   // run the kernel
      	   CALL_CL_GUARDED(clEnqueueNDRangeKernel, (queue, poisson_knl, /*dimensions*/ wg_dims, NULL, gdim, ldim, 0, NULL, evt_ptr));
      	   #ifdef DO_TIMING
@@ -481,6 +492,7 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
       	   CALL_CL_GUARDED(clGetEventProfilingInfo, (evt, CL_PROFILING_COMMAND_END, sizeof(start), &end, NULL));
  
       	   gbytes_accessed += 1e-9*(sizeof(ftype) * field_size * fetch_per_pt);
+	   start_big = start;
       	   seconds_taken += 1e-9*(end-start);
       	   mcells_updated += curr->dim_other*curr->dim_other*curr->dim_other/1e6;
       	   gflops_performed += 1e-9*curr->dim_x*curr->dim_x*curr->dim_x * flops_per_pt;
@@ -488,6 +500,9 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
       	   CALL_CL_GUARDED(clReleaseEvent, (evt));
      	   #endif
       	   CALL_CL_GUARDED(clFinish, (queue)); //ira adentro??
+	   cl_mem tmp = dev_buf_u;
+	   dev_buf_u = dev_buf_hist_u;
+	   dev_buf_hist_u = tmp;
      	}
         //when I'm done, read from buffer
         CALL_CL_GUARDED(clEnqueueReadBuffer, (queue, dev_buf_u, /*blocking*/ CL_TRUE, /*offset*/ 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
@@ -512,6 +527,7 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
   	// fill in the buffers inside the GPU with the current data
   	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_u, CL_TRUE, 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
   	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_f, CL_TRUE, 0, field_size * sizeof(ftype), curr->fvec, 0, NULL, NULL));
+  	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_hist_u, CL_TRUE, 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
   	h = dxval[nl] * dxval[nl];
         size_t gdim[] = { curr->dim_x, curr->dim_x, curr->dim_x/z_div };
         size_t ldim[] = { wg_x, wg_y, wg_z };
@@ -520,14 +536,10 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
      	   // ----------------------------------------------------------------------
      	   // invoke poisson kernel
      	   // ----------------------------------------------------------------------
-     	   SET_6_KERNEL_ARGS(poisson_knl, dev_buf_u, dev_buf_f, curr->field_start, curr->dim_x, curr->dim_other, h);
-     	   #ifdef DO_TIMING
-     	   cl_event evt;
-     	   cl_event *evt_ptr = &evt;
-     	   #else
-     	   cl_event *evt_ptr = NULL;
-     	   #endif
+	   curr->field_start = 0;
+     	   SET_7_KERNEL_ARGS(poisson_knl, dev_buf_u, dev_buf_f, dev_buf_hist_u,curr->field_start, curr->dim_x, curr->dim_other, h);
      	   // run the kernel
+	   curr->field_start = 0;
      	   CALL_CL_GUARDED(clEnqueueNDRangeKernel, (queue, poisson_knl, /*dimensions*/ wg_dims, NULL, gdim, ldim, 0, NULL, evt_ptr));
      	   #ifdef DO_TIMING
       	   // If timing is enabled, this wait can mean a significant performance hit.
@@ -545,6 +557,9 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
       	   CALL_CL_GUARDED(clReleaseEvent, (evt));
      	   #endif
       	   CALL_CL_GUARDED(clFinish, (queue)); //ira adentro??
+	   cl_mem tmp = dev_buf_u;
+	   dev_buf_u = dev_buf_hist_u;
+	   dev_buf_hist_u = tmp;
      	}
         //when I'm done, read from buffer
         CALL_CL_GUARDED(clEnqueueReadBuffer, (queue, dev_buf_u, /*blocking*/ CL_TRUE, /*offset*/ 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
@@ -576,6 +591,7 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
   	// fill in the buffers inside the GPU with the current data
   	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_u, CL_TRUE, 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
   	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_f, CL_TRUE, 0, field_size * sizeof(ftype), curr->fvec, 0, NULL, NULL));
+  	CALL_CL_GUARDED(clEnqueueWriteBuffer, (queue, dev_buf_hist_u, CL_TRUE, 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
   	h = dxval[l] * dxval[l];
         size_t gdim[] = { curr->dim_x, curr->dim_x, curr->dim_x/z_div };
         size_t ldim[] = { wg_x, wg_y, wg_z };
@@ -584,13 +600,8 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
      	   // ----------------------------------------------------------------------
      	   // invoke poisson kernel
      	   // ----------------------------------------------------------------------
-     	   SET_6_KERNEL_ARGS(poisson_knl, dev_buf_u, dev_buf_f, curr->field_start, curr->dim_x, curr->dim_other, h);
-     	   #ifdef DO_TIMING
-     	   cl_event evt;
-     	   cl_event *evt_ptr = &evt;
-     	   #else
-     	   cl_event *evt_ptr = NULL;
-     	   #endif
+	   curr->field_start = 0;
+     	   SET_7_KERNEL_ARGS(poisson_knl, dev_buf_u, dev_buf_f, dev_buf_hist_u, curr->field_start, curr->dim_x, curr->dim_other, h);
      	   // run the kernel
      	   CALL_CL_GUARDED(clEnqueueNDRangeKernel, (queue, poisson_knl, /*dimensions*/ wg_dims, NULL, gdim, ldim, 0, NULL, evt_ptr));
      	   #ifdef DO_TIMING
@@ -603,12 +614,16 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
  
       	   gbytes_accessed += 1e-9*(sizeof(ftype) * field_size * fetch_per_pt);
       	   seconds_taken += 1e-9*(end-start);
+	   tot_secs += 1e-9*(end-start_big);
       	   mcells_updated += curr->dim_other*curr->dim_other*curr->dim_other/1e6;
       	   gflops_performed += 1e-9*curr->dim_x*curr->dim_x*curr->dim_x * flops_per_pt;
 
       	   CALL_CL_GUARDED(clReleaseEvent, (evt));
      	   #endif
       	   CALL_CL_GUARDED(clFinish, (queue)); //ira adentro??
+	   cl_mem tmp = dev_buf_u;
+	   dev_buf_u = dev_buf_hist_u;
+	   dev_buf_hist_u = tmp;
      	}
         //when I'm done, read from buffer
         CALL_CL_GUARDED(clEnqueueReadBuffer, (queue, dev_buf_u, /*blocking*/ CL_TRUE, /*offset*/ 0, field_size * sizeof(ftype), curr->uvec, 0, NULL, NULL));
@@ -627,6 +642,7 @@ void mgv(ftype f[], ftype u[], ftype dx, unsigned n1,unsigned n2,unsigned n3, si
   free(curr);
   CALL_CL_GUARDED(clReleaseMemObject, (dev_buf_u));
   CALL_CL_GUARDED(clReleaseMemObject, (dev_buf_f));
+  CALL_CL_GUARDED(clReleaseMemObject, (dev_buf_hist_u));
 }
 
 void resid2(item * curr, ftype dx){
